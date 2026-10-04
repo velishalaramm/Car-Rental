@@ -1,0 +1,210 @@
+
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'mynode'
+    }
+
+    environment {
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '342284838281'
+        ECR_REPOSITORY  = 'ram-car-rental'
+        IMAGE_NAME      = 'ramm-car-rental'
+        APP_NAME        = 'ramm-car-rental'
+
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_URI         = "${ECR_REGISTRY}/${ECR_REPOSITORY}"
+        NEXUS_URL       = 'http://100.60.74.114:8081'
+        NEXUS_REPOSITORY = 'ram-car-rental'
+    }
+
+    stages {
+
+        // 1. Checkout Source Code
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/velishalaramm/Car-Rental.git'
+            }
+        }
+
+        // 2. Install, Build and Test
+        stage('Build and Test') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Installing dependencies..."
+                    npm install
+
+                    echo "Building application..."
+                    npm run build
+
+                    echo "Running tests..."
+                    npm test
+
+                    echo "Build and tests completed successfully."
+                '''
+            }
+        }
+
+        // 3. SonarQube Code Analysis
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('Sonarqube-scanner') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=Ramm-CAR-Rental \
+                            -Dsonar.projectName=Ramm-CAR-Rental \
+                            -Dsonar.sources=server.js,src,public \
+                            -Dsonar.tests=test
+                        """
+                    }
+                }
+            }
+        }
+
+        // 4. SonarQube Quality Gate
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        // 5. Upload Artifact to Nexus
+        stage('Upload to Nexus') {
+            steps {
+                sh '''
+                    set -e
+
+                    ARCHIVE="/tmp/${APP_NAME}-${BUILD_NUMBER}.tar.gz"
+
+                    echo "Creating application archive..."
+
+                    tar \
+                        --exclude=node_modules \
+                        --exclude=.git \
+                        -czf "$ARCHIVE" \
+                        -C "$WORKSPACE" .
+
+                    ls -lh "$ARCHIVE"
+                '''
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'Nexus',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+                        set +x
+
+                        echo "Uploading artifact to Nexus..."
+
+                        curl --fail --show-error \
+                            -u "$NEXUS_USER:$NEXUS_PASS" \
+                            --upload-file "/tmp/${APP_NAME}-${BUILD_NUMBER}.tar.gz" \
+                            "${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${APP_NAME}-${BUILD_NUMBER}.tar.gz"
+
+                        echo "Nexus upload completed."
+                    '''
+                }
+            }
+        }
+
+        // 6. Build Docker Image
+        stage('Docker Image Build') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Building Docker image..."
+
+                    docker build \
+                        -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+
+                    docker images ${IMAGE_NAME}
+                '''
+            }
+        }
+
+        // 7. Scan Docker Image with Trivy
+        stage('Trivy Scan') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Scanning Docker image for vulnerabilities..."
+
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                    echo "Trivy scan completed."
+                '''
+            }
+        }
+
+        // 8. Push Image to AWS ECR
+        stage('Push to AWS ECR') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Logging in to AWS ECR..."
+
+                    aws ecr get-login-password \
+                        --region "$AWS_REGION" | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin "$ECR_REGISTRY"
+
+                    echo "Tagging Docker image..."
+
+                    docker tag \
+                        ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        ${ECR_URI}:${BUILD_NUMBER}
+
+                    docker tag \
+                        ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        ${ECR_URI}:latest
+
+                    echo "Pushing image with build number..."
+
+                    docker push ${ECR_URI}:${BUILD_NUMBER}
+
+                    echo "Pushing latest image..."
+
+                    docker push ${ECR_URI}:latest
+
+                    echo "Image successfully pushed to AWS ECR."
+                    echo "${ECR_URI}:${BUILD_NUMBER}"
+                    echo "${ECR_URI}:latest"
+                '''
+            }
+        }
+    }
+
+    // 9. Post Build Actions
+    post {
+        success {
+            echo 'Ramm Car Rental pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please check the Jenkins console output.'
+        }
+
+        always {
+            echo 'Ramm Car Rental CI/CD pipeline execution finished.'
+        }
+    }
+}
