@@ -1,0 +1,15 @@
+{
+  "name": "ramm-car-rental",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ramm Car Rental demo application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "build": "node --check server.js && node --check src/pricing.js && node --check public/app.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
